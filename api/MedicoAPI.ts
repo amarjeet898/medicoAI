@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { AIModel, APIResponse, ChatMessage, UserProfile } from '../constants/Types';
+import { AIModel, APIResponse, ChatMessage, UserProfile, ImageAnalysisRequest } from '../constants/Types';
 
 // Import models data (we'll copy from the JSON file)
 const availableModels: AIModel[] = [
@@ -19,7 +19,8 @@ const availableModels: AIModel[] = [
 ];
 
 export class MedicoAPI {
-  private static baseURL = 'https://your-mcp-server-domain.com/mcp-server.php'; // Replace with actual domain
+  private static baseURL = 'https://text.pollinations.ai/openai'; // Using Pollinations.ai OpenAI-compatible endpoint
+  private static legacyURL = 'https://your-mcp-server-domain.com/mcp-server.php'; // Replace with actual domain for legacy support
   
   static getAvailableModels(): AIModel[] {
     return availableModels.filter(model => model.accessible);
@@ -27,6 +28,10 @@ export class MedicoAPI {
 
   static getModelByName(name: string): AIModel | undefined {
     return availableModels.find(model => model.name === name);
+  }
+
+  static getVisionCapableModels(): AIModel[] {
+    return availableModels.filter(model => model.accessible && model.vision);
   }
 
   private static generateSystemPrompt(userProfile: UserProfile): string {
@@ -59,21 +64,53 @@ Created and maintained by Sukhdev Singh, a computer science professional passion
     try {
       const systemPrompt = this.generateSystemPrompt(userProfile);
       
-      // Build conversation memory from chat history
-      const memory = chatHistory.map(msg => ({
-        role: msg.role,
-        content: msg.content
-      }));
+      // Build OpenAI-compatible messages array
+      const messages: any[] = [
+        { role: 'system', content: systemPrompt }
+      ];
+
+      // Add chat history
+      chatHistory.forEach(msg => {
+        messages.push({
+          role: msg.role,
+          content: msg.content
+        });
+      });
+
+      // Create user message with multimodal content if images are provided
+      let userMessage: any;
+      if (images && images.length > 0) {
+        const content: any[] = [
+          { type: 'text', text: prompt }
+        ];
+        
+        // Add images to content
+        images.forEach(imageUrl => {
+          content.push({
+            type: 'image_url',
+            image_url: { url: imageUrl }
+          });
+        });
+        
+        userMessage = {
+          role: 'user',
+          content: content
+        };
+      } else {
+        userMessage = {
+          role: 'user',
+          content: prompt
+        };
+      }
+      
+      messages.push(userMessage);
 
       const payload = {
-        prompt,
-        system_prompt: systemPrompt,
         model,
+        messages,
         temperature: 0.2,
         max_tokens: 700,
-        language: 'en',
-        memory,
-        images: images || []
+        stream: false
       };
 
       const response = await axios.post(this.baseURL, payload, {
@@ -83,7 +120,23 @@ Created and maintained by Sukhdev Singh, a computer science professional passion
         timeout: 30000, // 30 second timeout
       });
 
-      return response.data;
+      // Transform response to match our APIResponse interface
+      const openAIResponse = response.data;
+      if (openAIResponse.choices && openAIResponse.choices[0]) {
+        return {
+          success: true,
+          content: openAIResponse.choices[0].message.content,
+          model,
+          timestamp: new Date().toISOString(),
+          usage: openAIResponse.usage || {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0
+          }
+        };
+      } else {
+        throw new Error('Invalid response format from API');
+      }
     } catch (error) {
       console.error('API Error:', error);
       
@@ -131,5 +184,277 @@ Created and maintained by Sukhdev Singh, a computer science professional passion
       }
     }
     return 'mistral'; // fallback
+  }
+
+  // Vision Analysis Methods
+  static async analyzeImage(
+    imageUrl: string,
+    question: string = "Analyze this medical image and provide detailed observations.",
+    userProfile: UserProfile,
+    model: string = 'openai'
+  ): Promise<APIResponse> {
+    try {
+      // Ensure we use a vision-capable model
+      const selectedModel = this.getModelByName(model);
+      if (!selectedModel || !selectedModel.vision) {
+        const visionModels = this.getVisionCapableModels();
+        if (visionModels.length === 0) {
+          return {
+            success: false,
+            error: 'No vision-capable models available'
+          };
+        }
+        model = visionModels[0].name;
+      }
+
+      const systemPrompt = this.generateSystemPrompt(userProfile) + 
+        "\n\nYou are analyzing medical images. Provide detailed, accurate observations focusing on medical relevance. Always recommend consulting healthcare professionals for diagnosis.";
+
+      const payload = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: question },
+              { type: 'image_url', image_url: { url: imageUrl } }
+            ]
+          }
+        ],
+        max_tokens: 800,
+        temperature: 0.2
+      };
+
+      const response = await axios.post(this.baseURL, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 45000
+      });
+
+      const openAIResponse = response.data;
+      if (openAIResponse.choices && openAIResponse.choices[0]) {
+        return {
+          success: true,
+          content: openAIResponse.choices[0].message.content,
+          model,
+          timestamp: new Date().toISOString(),
+          usage: openAIResponse.usage
+        };
+      } else {
+        throw new Error('Invalid response format from API');
+      }
+    } catch (error) {
+      console.error('Vision Analysis Error:', error);
+      return this.handleAPIError(error);
+    }
+  }
+
+  static async analyzeImageBase64(
+    imageBase64: string,
+    userProfile: UserProfile,
+    question: string = "Analyze this medical image and provide detailed observations.",
+    imageFormat: string = 'jpeg',
+    model: string = 'openai'
+  ): Promise<APIResponse> {
+    try {
+      const dataUrl = `data:image/${imageFormat};base64,${imageBase64}`;
+      return await this.analyzeImage(dataUrl, question, userProfile, model);
+    } catch (error) {
+      console.error('Base64 Image Analysis Error:', error);
+      return this.handleAPIError(error);
+    }
+  }
+
+  // Audio Transcription Methods
+  static async transcribeAudio(
+    audioBase64: string,
+    audioFormat: 'wav' | 'mp3' = 'mp3',
+    userProfile: UserProfile
+  ): Promise<APIResponse> {
+    try {
+      const systemPrompt = this.generateSystemPrompt(userProfile) + 
+        "\n\nYou are transcribing medical audio. Provide accurate transcription with proper medical terminology.";
+
+      const payload = {
+        model: 'openai-audio',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Please transcribe this audio:' },
+              {
+                type: 'input_audio',
+                input_audio: {
+                  data: audioBase64,
+                  format: audioFormat
+                }
+              }
+            ]
+          }
+        ]
+      };
+
+      const response = await axios.post(this.baseURL, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 60000 // Longer timeout for audio processing
+      });
+
+      const openAIResponse = response.data;
+      if (openAIResponse.choices && openAIResponse.choices[0]) {
+        return {
+          success: true,
+          content: openAIResponse.choices[0].message.content,
+          model: 'openai-audio',
+          timestamp: new Date().toISOString(),
+          usage: openAIResponse.usage
+        };
+      } else {
+        throw new Error('Invalid response format from API');
+      }
+    } catch (error) {
+      console.error('Audio Transcription Error:', error);
+      return this.handleAPIError(error);
+    }
+  }
+
+  // Multi-modal medical analysis
+  static async analyzeMultiModal(
+    textPrompt: string,
+    images: string[] = [],
+    audioBase64?: string,
+    audioFormat?: 'wav' | 'mp3',
+    userProfile: UserProfile,
+    model: string = 'openai'
+  ): Promise<APIResponse> {
+    try {
+      const systemPrompt = this.generateSystemPrompt(userProfile) + 
+        "\n\nYou are performing multi-modal medical analysis. Analyze all provided inputs (text, images, audio) comprehensively and provide integrated medical insights.";
+
+      const content: any[] = [
+        { type: 'text', text: textPrompt }
+      ];
+
+      // Add images
+      images.forEach(imageUrl => {
+        content.push({
+          type: 'image_url',
+          image_url: { url: imageUrl }
+        });
+      });
+
+      // Add audio if provided
+      if (audioBase64 && audioFormat) {
+        content.push({
+          type: 'input_audio',
+          input_audio: {
+            data: audioBase64,
+            format: audioFormat
+          }
+        });
+      }
+
+      const payload = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: content
+          }
+        ],
+        max_tokens: 1000,
+        temperature: 0.2
+      };
+
+      const response = await axios.post(this.baseURL, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 60000
+      });
+
+      const openAIResponse = response.data;
+      if (openAIResponse.choices && openAIResponse.choices[0]) {
+        return {
+          success: true,
+          content: openAIResponse.choices[0].message.content,
+          model,
+          timestamp: new Date().toISOString(),
+          usage: openAIResponse.usage
+        };
+      } else {
+        throw new Error('Invalid response format from API');
+      }
+    } catch (error) {
+      console.error('Multi-modal Analysis Error:', error);
+      return this.handleAPIError(error);
+    }
+  }
+
+  // Enhanced error handling
+  private static handleAPIError(error: any): APIResponse {
+    if (axios.isAxiosError(error)) {
+      if (error.code === 'ECONNABORTED') {
+        return {
+          success: false,
+          error: 'Request timed out. Please try again with a smaller file or simpler query.',
+        };
+      }
+      
+      if (error.response) {
+        const status = error.response.status;
+        if (status === 413) {
+          return {
+            success: false,
+            error: 'File too large. Please use a smaller image or audio file.',
+          };
+        } else if (status === 429) {
+          return {
+            success: false,
+            error: 'Rate limit exceeded. Please wait a moment before trying again.',
+          };
+        } else if (status >= 500) {
+          return {
+            success: false,
+            error: 'Server error. Please try again later.',
+          };
+        } else {
+          return {
+            success: false,
+            error: `API error: ${status}. Please check your input and try again.`,
+          };
+        }
+      }
+      
+      if (error.request) {
+        return {
+          success: false,
+          error: 'Network error. Please check your internet connection.',
+        };
+      }
+    }
+
+    return {
+      success: false,
+      error: 'An unexpected error occurred. Please try again.',
+    };
+  }
+
+  // Helper method to convert file to base64
+  static async fileToBase64(file: any): Promise<string> {
+    return new Promise((resolve, reject) => {
+      try {
+        // This would be implemented differently in React Native
+        // Using FileReader for web compatibility, but in RN you'd use react-native-fs
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 }

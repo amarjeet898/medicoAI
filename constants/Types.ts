@@ -61,6 +61,37 @@ export interface ChatHistory {
   lastUpdated: Date;
 }
 
+export interface ImageAnalysisRequest {
+  imageUrl?: string;
+  imageBase64?: string;
+  question?: string;
+}
+
+export interface AudioTranscriptionRequest {
+  audioBase64: string;
+  format: 'wav' | 'mp3';
+}
+
+export interface VisionMessage {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: {
+    url: string;
+  };
+}
+
+export interface MultimodalContent {
+  type: 'text' | 'image_url' | 'input_audio';
+  text?: string;
+  image_url?: {
+    url: string;
+  };
+  input_audio?: {
+    data: string;
+    format: string;
+  };
+}
+
 export type RootStackParamList = {
   Onboarding: undefined;
   Setup: undefined;
